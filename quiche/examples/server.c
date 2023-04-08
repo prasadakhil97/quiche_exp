@@ -86,52 +86,17 @@ static void debug_log(const char *line, void *argp) {
     fprintf(stderr, "%s\n", line);
 }
 
-bool flag = false;
-int peace = 0;
-FILE *fp = NULL;
-int num_times = 0;
-bool stop_sending = false;
-ssize_t init_retrans = 0;
-char buf_rnd[10000] = {'\0'};
-char buf_dgram_rnd[1310] = {'\0'};
-
-
-long getcurTime() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    long curtime = tv.tv_sec *1000000 + tv.tv_usec;
-    return curtime;
-}
-
-bool record_flag = false;
-long gl_start_ts;
-long gl_stream_out_ts[1000];
-int gl_stream_out_cnt = 0;
-
-long gl_dgram_out_ts[1000];
-int gl_dgram_out_cnt = 0;
-
 static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
     static uint8_t out[MAX_DATAGRAM_SIZE];
 
     quiche_send_info send_info;
 
     while (1) {
-        ssize_t temp = quiche_conn_dgram_send_queue_len(conn_io->conn);
-        ssize_t temp_stream = quiche_conn_stream_capacity(conn_io->conn, 4);
-
         ssize_t written = quiche_conn_send(conn_io->conn, out, sizeof(out),
                                            &send_info);
 
-        temp -= quiche_conn_dgram_send_queue_len(conn_io->conn);
-        temp_stream -= quiche_conn_stream_capacity(conn_io->conn, 4);
-
-        if(temp > 0){
-            peace++;
-        }
-
         if (written == QUICHE_ERR_DONE) {
-            //fprintf(stderr, "done writing\n");
+            fprintf(stderr, "done writing\n");
             break;
         }
 
@@ -149,22 +114,7 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
             return;
         }
 
-        if(temp >  0 && flag && record_flag) {
-            gl_dgram_out_ts[gl_dgram_out_cnt] = getcurTime();
-            gl_dgram_out_cnt += 1;
-        }
-
-        else if(flag && record_flag) {
-            gl_stream_out_ts[gl_stream_out_cnt] = getcurTime();
-            gl_stream_out_cnt += 1;
-        }
-
-        //fprintf(stderr, "sent %zd bytes\n", sent);
-    }
-
-    if (record_flag) {
-        //record only once
-        record_flag = false;
+        fprintf(stderr, "sent %zd bytes\n", sent);
     }
 
     double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
@@ -276,7 +226,6 @@ static struct conn_io *create_conn(uint8_t *scid, size_t scid_len,
 
 static void recv_cb(EV_P_ ev_io *w, int revents) {
     struct conn_io *tmp, *conn_io = NULL;
-    static bool ready_to_send = false;
 
     static uint8_t buf[65535];
     static uint8_t out[MAX_DATAGRAM_SIZE];
@@ -418,7 +367,7 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
             continue;
         }
 
-        //fprintf(stderr, "recv %zd bytes\n", done);
+        fprintf(stderr, "recv %zd bytes\n", done);
 
         if (quiche_conn_is_established(conn_io->conn)) {
             uint64_t s = 0;
@@ -435,14 +384,12 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                 if (recv_len < 0) {
                     break;
                 }
-                ready_to_send = true;
 
-                /*if (fin && !ready_to_send) {
-                    ready_to_send = true;
-                    //static const char *resp = "byez\n";
-                    //quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
-                    //                      5, true);
-                }*/
+                if (fin) {
+                    static const char *resp = "byez\n";
+                    quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
+                                            5, true);
+                }
             }
 
             quiche_stream_iter_free(readable);
@@ -450,55 +397,6 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
     }
 
     HASH_ITER(hh, conns->h, conn_io, tmp) {
-        if (ready_to_send && quiche_conn_is_established(conn_io->conn)) {
-            ssize_t stream_cap = quiche_conn_stream_capacity(conn_io->conn, 4);
-            //printf("\nStream Cap: %d\n", stream_cap);
-
-            size_t temp_cap = stream_cap/2 - 1000;
-            temp_cap = temp_cap >= 10000 ? 10000 : temp_cap;
-
-            printf("Stream Cap %d\n", (int)temp_cap);
-            if(temp_cap <= 0)
-                break;
-
-            quiche_conn_stream_send(conn_io->conn, 4, (uint8_t *) buf_rnd, temp_cap, false);
-
-            for(int i = 0; i <= temp_cap/1310; i++) {
-                int temp = temp_cap >= 1310 ? 1310 : temp_cap;
-                quiche_conn_dgram_send(conn_io->conn, (uint8_t *) buf_dgram_rnd, temp);
-                temp_cap -= 1310;
-                if(temp_cap <= 0)
-                    break;
-            }
-
-            /*if (stream_cap > 65000 && !stop_sending){
-                quiche_stats stats;
-                quiche_conn_stats(conn_io->conn, &stats);
-                init_retrans = stats.retrans;
-
-                flag = true;
-                record_flag = true;
-
-                stop_sending = true;
-
-                char buf_rnd[50000] = {'\0'};
-                char buf_dgram_rnd[1310] = {'\0'};
-
-
-                printf("Max Datagram Writable %d bytes\n",(int)quiche_conn_dgram_max_writable_len(conn_io->conn));
-                for(int i = 0; i < 30;i++) {
-                    quiche_conn_dgram_send(conn_io->conn, (uint8_t *) buf_dgram_rnd, 1310);
-                }
-                //quiche_conn_dgram_send(conn_io->conn, (uint8_t *) buf_dgram_rnd, 220);
-
-                quiche_conn_stream_send(conn_io->conn, 4, (uint8_t *) buf_rnd, 13000, false);
-                gl_start_ts = getcurTime();
-            }
-            if (!flag){
-                quiche_conn_stream_send(conn_io->conn, 4, (uint8_t *) resp2, 10000, false);
-            }*/
-        }
-
         flush_egress(loop, conn_io);
 
         if (quiche_conn_is_closed(conn_io->conn)) {
@@ -544,27 +442,6 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
         quiche_conn_free(conn_io->conn);
         free(conn_io);
 
-        if (gl_dgram_out_cnt != 30) {
-            fprintf(fp, "Error: incorrect number of dgram out, current: %d", gl_dgram_out_cnt);
-        }
-
-        fprintf(fp, "%ld, dgram start time, cnt: %d\n", gl_start_ts, gl_dgram_out_cnt);
-        fprintf(fp, "%ld, stream start time, cnt: %d\n", gl_start_ts, gl_stream_out_cnt);
-
-
-
-        for (int i = 0; i < gl_dgram_out_cnt; i++){
-            fprintf(fp, "%ld, dgram out, cnt: %d\n", gl_dgram_out_ts[i], i);
-        }
-
-        for (int i = 0; i < gl_stream_out_cnt; i++) {
-            fprintf(fp, "%ld, stream out, cnt: %d\n", gl_dgram_out_ts[i], i);
-        }
-
-        fprintf(fp, "Sent %d Datagram frames\n", peace);
-        fclose(fp);
-        num_times++;
-
         return;
     }
 }
@@ -573,30 +450,13 @@ int main(int argc, char *argv[]) {
     const char *host = argv[1];
     const char *port = argv[2];
 
-    flag = false;
-    peace = 0;
-    stop_sending = false;
-
-    int set_cc = 0;
-    if(!strcmp(argv[4], "reno"))
-        set_cc = 0;
-    else if(!strcmp(argv[4], "cubic"))
-        set_cc = 1;
-    else
-        set_cc = 2;
-
-    const char *log_file = argv[3];
-    fp = fopen(log_file, "w");
-    if(fp == NULL)
-        exit(0);
-
     const struct addrinfo hints = {
         .ai_family = PF_UNSPEC,
         .ai_socktype = SOCK_DGRAM,
         .ai_protocol = IPPROTO_UDP
     };
 
-    //quiche_enable_debug_logging(debug_log, NULL);
+    quiche_enable_debug_logging(debug_log, NULL);
 
     struct addrinfo *local;
     if (getaddrinfo(host, port, &hints, &local) != 0) {
@@ -632,15 +492,14 @@ int main(int argc, char *argv[]) {
     quiche_config_set_application_protos(config,
         (uint8_t *) "\x0ahq-interop\x05hq-29\x05hq-28\x05hq-27\x08http/0.9", 38);
 
-    quiche_config_set_max_idle_timeout(config, 10000);
+    quiche_config_set_max_idle_timeout(config, 5000);
     quiche_config_set_max_recv_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_max_send_udp_payload_size(config, MAX_DATAGRAM_SIZE);
-    quiche_config_set_initial_max_data(config, 100000000000000);
-    quiche_config_set_initial_max_stream_data_bidi_local(config, 100000000000000);
-    quiche_config_set_initial_max_stream_data_bidi_remote(config, 100000000000000);
+    quiche_config_set_initial_max_data(config, 10000000);
+    quiche_config_set_initial_max_stream_data_bidi_local(config, 1000000);
+    quiche_config_set_initial_max_stream_data_bidi_remote(config, 1000000);
     quiche_config_set_initial_max_streams_bidi(config, 100);
-    quiche_config_set_cc_algorithm(config, set_cc);
-    quiche_config_enable_dgram(config, true, 100000000000000, 100000000000000);
+    quiche_config_set_cc_algorithm(config, QUICHE_CC_RENO);
 
     struct connections c;
     c.sock = sock;

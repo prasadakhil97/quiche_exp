@@ -42,9 +42,18 @@
 
 #include <quiche.h>
 
+#include <signal.h>
+#include <sys/time.h>
+
 #define LOCAL_CONN_ID_LEN 16
 
 #define MAX_DATAGRAM_SIZE 1350
+
+int stream_bytes[1200] = {-1};
+int dgram_bytes[1200] = {-1};
+int stream_recv_bytes = 0;
+int dgram_recv_bytes = 0;
+int counter = 0;
 
 struct conn_io {
     ev_timer timer;
@@ -71,7 +80,7 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
                                            &send_info);
 
         if (written == QUICHE_ERR_DONE) {
-            fprintf(stderr, "done writing\n");
+            //fprintf(stderr, "done writing\n");
             break;
         }
 
@@ -138,7 +147,7 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
             continue;
         }
 
-        fprintf(stderr, "recv %zd bytes\n", done);
+        //fprintf(stderr, "recv %zd bytes\n", done);
     }
 
     fprintf(stderr, "done reading\n");
@@ -159,8 +168,9 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
         fprintf(stderr, "connection established: %.*s\n",
                 (int) app_proto_len, app_proto);
 
-        const static uint8_t r[] = "GET /index.html\r\n";
-        if (quiche_conn_stream_send(conn_io->conn, 4, r, sizeof(r), true) < 0) {
+        const static uint8_t r[] = "HELLO WORLD\n";
+
+        if (quiche_conn_stream_send(conn_io->conn, 4, r, sizeof(r), false) < 0) {
             fprintf(stderr, "failed to send HTTP request\n");
             return;
         }
@@ -185,8 +195,10 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
             if (recv_len < 0) {
                 break;
             }
-
-            printf("%.*s", (int) recv_len, buf);
+            
+            //fprintf(stderr, "recv %zd bytes\n", recv_len);
+            //printf("%.*s", (int) recv_len, buf);
+            stream_recv_bytes += recv_len;
 
             if (fin) {
                 if (quiche_conn_close(conn_io->conn, true, 0, NULL, 0) < 0) {
@@ -196,6 +208,16 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
         }
 
         quiche_stream_iter_free(readable);
+
+        if (quiche_conn_is_readable(conn_io->conn)) {
+            while(1) {
+                ssize_t recv_dgram_len = quiche_conn_dgram_recv(conn_io->conn, buf, sizeof(buf));
+                if(recv_dgram_len <= 0)
+                    break;
+                dgram_recv_bytes += recv_dgram_len;
+                //fprintf(stderr, "recv dgram %zd bytes\n", recv_dgram_len);
+            }
+        }
     }
 
     flush_egress(loop, conn_io);
@@ -218,10 +240,39 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
 
         fprintf(stderr, "connection closed, recv=%zu sent=%zu lost=%zu rtt=%" PRIu64 "ns\n",
                 stats.recv, stats.sent, stats.lost, path_stats.rtt);
+        
+        FILE *fp1 = fopen("stream.txt", "w");
+        FILE *fp2 = fopen("dgram.txt", "w");
+
+        for(int i = 0; i < 1200; i++) {
+            fprintf(fp1, "%d\n", stream_bytes[i]);
+            fprintf(fp2, "%d\n", dgram_bytes[i]);
+        }
+
+        fclose(fp1);
+        fclose(fp2);
 
         ev_break(EV_A_ EVBREAK_ONE);
         return;
     }
+}
+
+static void timer_cb(int signum) {
+    stream_bytes[counter] = stream_recv_bytes;
+    dgram_bytes[counter] = dgram_recv_bytes; 
+    stream_recv_bytes = 0;
+    dgram_recv_bytes = 0;
+    counter++;
+}
+
+void set_timer(uint32_t msec){
+        struct itimerval t;
+        t.it_interval.tv_sec = msec;
+        t.it_interval.tv_usec = 0;
+        t.it_value.tv_sec = msec;
+        t.it_value.tv_usec = 0;
+
+        setitimer(ITIMER_REAL, &t, NULL);
 }
 
 int main(int argc, char *argv[]) {
@@ -234,7 +285,7 @@ int main(int argc, char *argv[]) {
         .ai_protocol = IPPROTO_UDP
     };
 
-    quiche_enable_debug_logging(debug_log, NULL);
+    //quiche_enable_debug_logging(debug_log, NULL);
 
     struct addrinfo *peer;
     if (getaddrinfo(host, port, &hints, &peer) != 0) {
@@ -262,15 +313,16 @@ int main(int argc, char *argv[]) {
     quiche_config_set_application_protos(config,
         (uint8_t *) "\x0ahq-interop\x05hq-29\x05hq-28\x05hq-27\x08http/0.9", 38);
 
-    quiche_config_set_max_idle_timeout(config, 5000);
+    quiche_config_set_max_idle_timeout(config, 10000);
     quiche_config_set_max_recv_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_max_send_udp_payload_size(config, MAX_DATAGRAM_SIZE);
-    quiche_config_set_initial_max_data(config, 10000000);
-    quiche_config_set_initial_max_stream_data_bidi_local(config, 1000000);
-    quiche_config_set_initial_max_stream_data_uni(config, 1000000);
+    quiche_config_set_initial_max_data(config, 100000000000000);
+    quiche_config_set_initial_max_stream_data_bidi_local(config, 100000000000000);
+    quiche_config_set_initial_max_stream_data_uni(config, 10000000000000);
     quiche_config_set_initial_max_streams_bidi(config, 100);
     quiche_config_set_initial_max_streams_uni(config, 100);
     quiche_config_set_disable_active_migration(config, true);
+    quiche_config_enable_dgram(config, true, 100000000000000, 100000000000000);
 
     if (getenv("SSLKEYLOGFILE")) {
       quiche_config_log_keys(config);
@@ -318,6 +370,9 @@ int main(int argc, char *argv[]) {
 
     ev_io watcher;
 
+    signal(SIGALRM, timer_cb);
+    set_timer(1);
+
     struct ev_loop *loop = ev_default_loop(0);
 
     ev_io_init(&watcher, recv_cb, conn_io->sock, EV_READ);
@@ -336,6 +391,8 @@ int main(int argc, char *argv[]) {
     quiche_conn_free(conn);
 
     quiche_config_free(config);
+
+    //ev_loop_close(ev_default_loop());
 
     return 0;
 }
